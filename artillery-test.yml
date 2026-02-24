@@ -1,0 +1,44 @@
+config:
+  target: "ws://localhost:8080"
+  engines:
+    ws: {}
+  phases:
+    - duration: 30
+      arrivalRate: 2
+      rampTo: 10
+      name: Gentle warm up
+    - duration: 60
+      arrivalRate: 10
+      name: Sustained load
+  payload:
+    path: "users.csv"
+    fields:
+      - "username"
+    order: random
+  processor: "./artillery-processor.js"
+
+scenarios:
+  - name: "Anonymous Video Chat Entry"
+    engine: ws
+    flow:
+      # 1. Fetch token via HTTP (handled by processor, NOT Artillery engine)
+      - function: "getToken"
+
+      # 2. Connect to WebSocket (connectWithToken builds URL with token from getToken)
+      - connect:
+          function: "connectWithToken"
+
+      # 3. Join Matchmaking Queue
+      - send:
+          type: "join"
+          mode: "video"
+
+      # 4. Stay connected (simulating short interaction)
+      - think: 10
+
+      # 5. Skip to next partner (stress matchmaking)
+      - send:
+          type: "skip"
+
+      # 6. Wait for next match
+      - think: 5

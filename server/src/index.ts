@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import { createServer } from 'http';
+import path from 'path'; // Added for static files
 import { WebSocketServer } from 'ws';
 import { env } from './config/env';
 import { verifyToken } from './config/jwt';
@@ -14,14 +15,51 @@ const app = express();
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
+// 1. Serve static files from the React app
+const buildPath = path.join(__dirname, '../../build');
+app.use(express.static(buildPath));
+
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), platform: 'huggingface' });
 });
 
 app.use('/api/auth', authRoutes);
 
+// 2. Handle React Routing (SPA)
+app.get('*', (req, res, next) => {
+  // If request is for API or WS, let it pass
+  if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
+    return next();
+  }
+  res.sendFile(path.join(buildPath, 'index.html'));
+});
+
 const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+// verifyClient runs BEFORE WebSocket handshake - reject bad tokens with HTTP 401
+// No path option on WebSocketServer - we accept all upgrades, verify path+token here
+function verifyClient(info: { req: import('http').IncomingMessage }, callback: (verified: boolean, code?: number) => void) {
+  try {
+    const pathname = (info.req.url || '').split('?')[0];
+    if (pathname !== '/ws' && pathname !== '/ws/') {
+      logger.warn('WS reject: wrong path %s', pathname);
+      return callback(false, 404);
+    }
+    const url = new URL(info.req.url || '', `http://${info.req.headers.host}`);
+    const token = url.searchParams.get('token') || info.req.headers.authorization?.replace('Bearer ', '') || '';
+    if (!token) {
+      logger.warn('WS reject: no token (url=%s)', info.req.url?.slice(0, 80));
+      return callback(false, 401);
+    }
+    verifyToken(token);
+    callback(true);
+  } catch (err) {
+    logger.warn('WS reject: invalid token - %s', err instanceof Error ? err.message : String(err));
+    callback(false, 401);
+  }
+}
+
+const wss = new WebSocketServer({ server: httpServer, verifyClient });
 
 // ═══════════════════════════════════════════════════════════════
 // 🏗️ SYSTEM INITIALIZATION - Following Omegle Architecture
@@ -42,7 +80,7 @@ function send(userId: string, message: ServerMessage): boolean {
   if (!user || user.ws.readyState !== user.ws.OPEN) {
     return false;
   }
-  
+
   try {
     user.ws.send(JSON.stringify(message));
     return true;
@@ -59,7 +97,7 @@ function send(userId: string, message: ServerMessage): boolean {
 function attemptMatch(): void {
   // Try to match as many pairs as possible in each mode
   // The while loop ensures we consume the queue until < 2 users remain
-  
+
   // 1. Video Queue
   let videoMatched = true;
   while (videoMatched) {
@@ -107,7 +145,7 @@ function handleMatchSuccess(userA: string, userB: string, sessionId: string, mod
   // Determine initiator (first user is initiator)
   const userARecord = stateManager.getUser(userA);
   const userBRecord = stateManager.getUser(userB);
-  
+
   if (!userARecord || !userBRecord) {
     stateManager.endSession(sessionId);
     return;
@@ -116,24 +154,24 @@ function handleMatchSuccess(userA: string, userB: string, sessionId: string, mod
   const initiator = (userARecord.enqueuedAt || 0) <= (userBRecord.enqueuedAt || 0) ? userA : userB;
 
   // Send match notifications
-  const sentA = send(userA, { 
-    type: 'matched', 
-    partnerId: userB, 
+  const sentA = send(userA, {
+    type: 'matched',
+    partnerId: userB,
     initiator: initiator === userA,
-    sessionId 
+    sessionId
   });
-  
-  const sentB = send(userB, { 
-    type: 'matched', 
-    partnerId: userA, 
+
+  const sentB = send(userB, {
+    type: 'matched',
+    partnerId: userA,
     initiator: initiator === userB,
-    sessionId 
+    sessionId
   });
 
   if (!sentA || !sentB) {
     logger.warn(`❌ Match notification failed for session ${sessionId} (A: ${sentA}, B: ${sentB}) - rolling back`);
     stateManager.endSession(sessionId);
-    
+
     // Requeue the user who successfully received the message (if any)
     if (sentA) {
       matchmaking.enqueueUser(userA);
@@ -161,12 +199,12 @@ function handleUserDisconnect(userId: string): void {
   const partner = stateManager.getSessionPartner(userId);
   if (partner) {
     send(partner, { type: 'partner-left' });
-    
+
     // End session and requeue partner
     if (user.sessionId) {
       stateManager.endSession(user.sessionId, userId);
     }
-    
+
     // Auto-requeue partner at END of queue (FIFO rule)
     const partnerUser = stateManager.getUser(partner);
     if (partnerUser) {
@@ -190,23 +228,23 @@ function handleUserDisconnect(userId: string): void {
 
 wss.on('connection', (ws, request) => {
   let userId: string;
-  
+
   try {
     // Authentication
     const url = new URL(request.url || '', `http://${request.headers.host}`);
-    const token = url.searchParams.get('token') || (request.headers.authorization?.replace('Bearer ', '') ?? '');
+    const token = url.searchParams.get('token') || request.headers.authorization?.replace('Bearer ', '') || '';
     if (!token) {
       ws.close(4001, 'Missing token');
       return;
     }
-    
+
     const payload = verifyToken(token);
     userId = payload.userId;
 
     // Add user to state manager
     stateManager.addUser(userId, ws);
     send(userId, { type: 'ready', userId });
-    
+
     logger.info(`🔌 User connected: ${userId}`);
 
     // ═══════════════════════════════════════════════════════════════
@@ -215,7 +253,7 @@ wss.on('connection', (ws, request) => {
 
     ws.on('message', (raw) => {
       let message: ClientMessage;
-      
+
       try {
         message = JSON.parse(raw.toString()) as ClientMessage;
       } catch (err) {
@@ -233,9 +271,9 @@ wss.on('connection', (ws, request) => {
         case 'join': {
           const mode = message.mode || 'video';
           stateManager.setMode(userId, mode);
-          
+
           const result = matchmaking.enqueueUser(userId);
-          
+
           if (!result.success) {
             send(userId, { type: 'error', message: result.reason || 'Cannot join queue' });
             break;
@@ -321,7 +359,7 @@ wss.on('connection', (ws, request) => {
         // ───────────────────────────────────────────────────────────
         case 'skip': {
           const skipResult = stateManager.handleSkip(userId);
-          
+
           if (!skipResult.success) {
             send(userId, { type: 'error', message: skipResult.reason || 'Cannot skip' });
             break;
@@ -330,7 +368,7 @@ wss.on('connection', (ws, request) => {
           // Notify partner they were skipped
           if (skipResult.partner) {
             send(skipResult.partner, { type: 'partner-skipped' });
-            
+
             // Requeue skipped partner at END of queue (FIFO rule)
             // Note: Their mode remains set from previous join
             const partnerEnqueue = matchmaking.enqueueUser(skipResult.partner);
@@ -437,7 +475,7 @@ wss.on('connection', (ws, request) => {
 
 const heartbeatTimer = setInterval(() => {
   const stats = stateManager.getStats();
-  
+
   logger.info(`💓 Heartbeat: ${stats.totalUsers} users, ${stats.activeSessions} sessions, V:${stats.searchingVideo}/A:${stats.searchingAudio}/T:${stats.searchingText} searching`);
 
   wss.clients.forEach((ws) => {
@@ -458,7 +496,7 @@ const heartbeatTimer = setInterval(() => {
 const maintenanceTimer = setInterval(() => {
   try {
     matchmaking.performMaintenance();
-    
+
     const stats = matchmaking.getStats();
     logger.debug(`📊 System stats:`, stats);
 
@@ -478,11 +516,11 @@ const maintenanceTimer = setInterval(() => {
 
 function gracefulShutdown(signal: string) {
   logger.info(`📴 ${signal} received - shutting down gracefully`);
-  
+
   // Clear timers
   clearInterval(heartbeatTimer);
   clearInterval(maintenanceTimer);
-  
+
   // Notify all connected users
   const stats = stateManager.getStats();
   logger.info(`📴 Disconnecting ${stats.totalUsers} users...`);
@@ -524,7 +562,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // 🚀 SERVER STARTUP
 // ═══════════════════════════════════════════════════════════════
 
-httpServer.listen(env.port, () => {
+httpServer.listen({ port: env.port, backlog: 2048 }, () => {
   logger.info(`🚀 UniTalks Server started`);
   logger.info(`📡 HTTP server: http://localhost:${env.port}`);
   logger.info(`🔌 WebSocket: ws://localhost:${env.port}/ws`);
