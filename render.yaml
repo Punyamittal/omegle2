@@ -1,0 +1,21 @@
+# UniTalks - Render Blueprint
+# Deploy: Connect repo at dashboard.render.com, Render will detect this file
+# Or create Web Service manually and use the commands from DEPLOY_RENDER.md
+
+services:
+  - type: web
+    name: unitalks
+    runtime: node
+    region: oregon
+
+    buildCommand: npm install && npm run build && cd server && npm install && npm run build
+    startCommand: cd server && node dist/index.js
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: USE_REDIS
+        value: "false"

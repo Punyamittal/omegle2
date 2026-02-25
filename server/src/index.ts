@@ -1,57 +1,135 @@
 import cors from 'cors';
 import express from 'express';
+import helmet from 'helmet';
+import compression from 'compression';
+import rateLimit from 'express-rate-limit';
 import { createServer } from 'http';
-import path from 'path'; // Added for static files
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
 import { WebSocketServer } from 'ws';
 import { env } from './config/env';
 import { verifyToken } from './config/jwt';
+import { getRedis, closeRedis } from './config/redis';
 import authRoutes from './routes/auth';
+import iceRoutes from './routes/ice';
 import { MatchmakingService } from './services/matchmaking';
 import { StateManager } from './services/stateManager';
+import { RedisStateManager } from './services/redisStateManager';
+import type { IStateManager } from './services/stateManager';
 import { ClientMessage, ServerMessage } from './types';
 import { logger } from './utils/logger';
+import { checkWsRateLimit } from './middleware/wsRateLimit';
+import { validateClientMessage } from './validation/wsMessages';
+
+// ═══════════════════════════════════════════════════════════════
+// 🏗️ APP SETUP
+// ═══════════════════════════════════════════════════════════════
 
 const app = express();
-app.use(cors({ origin: '*', credentials: true }));
+
+// Security
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+
+// CORS
+const corsOptions = {
+  origin: env.corsOrigin ? env.corsOrigin.split(',').map((o) => o.trim()) : '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 
-// 1. Serve static files from the React app
+// Rate limiting
+app.use(
+  rateLimit({
+    windowMs: env.rateLimitWindowMs,
+    max: env.rateLimitMax,
+    message: { error: 'Too many requests' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+
+// Static files
 const buildPath = path.join(__dirname, '../../build');
 app.use(express.static(buildPath));
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), platform: 'huggingface' });
+// Health check
+app.get('/health', async (_req, res) => {
+  const redis = await getRedis();
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    platform: 'unitalks',
+    redis: redis ? 'connected' : 'disabled',
+    uptime: process.uptime(),
+  });
 });
 
+// API routes
 app.use('/api/auth', authRoutes);
+app.use('/api/ice', iceRoutes);
 
-// 2. Handle React Routing (SPA)
+// SPA fallback
 app.get('*', (req, res, next) => {
-  // If request is for API or WS, let it pass
-  if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
-    return next();
-  }
+  if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
   res.sendFile(path.join(buildPath, 'index.html'));
 });
 
-const httpServer = createServer(app);
+// ═══════════════════════════════════════════════════════════════
+// 🚀 HTTP(S) SERVER
+// ═══════════════════════════════════════════════════════════════
 
-// verifyClient runs BEFORE WebSocket handshake - reject bad tokens with HTTP 401
-// No path option on WebSocketServer - we accept all upgrades, verify path+token here
-function verifyClient(info: { req: import('http').IncomingMessage }, callback: (verified: boolean, code?: number) => void) {
+let httpServer: import('http').Server | import('https').Server;
+
+if (env.httpsEnabled && env.sslCertPath && env.sslKeyPath) {
+  try {
+    const cert = fs.readFileSync(env.sslCertPath);
+    const key = fs.readFileSync(env.sslKeyPath);
+    httpServer = https.createServer({ cert, key }, app);
+    logger.info('HTTPS enabled');
+  } catch (err) {
+    logger.error('HTTPS failed, falling back to HTTP:', err);
+    httpServer = createServer(app);
+  }
+} else {
+  httpServer = createServer(app);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🔌 WEBSOCKET - verifyClient
+// ═══════════════════════════════════════════════════════════════
+
+function verifyClient(
+  info: { req: import('http').IncomingMessage },
+  callback: (verified: boolean, code?: number) => void
+) {
   try {
     const pathname = (info.req.url || '').split('?')[0];
     if (pathname !== '/ws' && pathname !== '/ws/') {
       logger.warn('WS reject: wrong path %s', pathname);
       return callback(false, 404);
     }
+
     const url = new URL(info.req.url || '', `http://${info.req.headers.host}`);
     const token = url.searchParams.get('token') || info.req.headers.authorization?.replace('Bearer ', '') || '';
     if (!token) {
-      logger.warn('WS reject: no token (url=%s)', info.req.url?.slice(0, 80));
+      logger.warn('WS reject: no token');
       return callback(false, 401);
     }
-    verifyToken(token);
+
+    const payload = verifyToken(token);
+    const userId = payload.userId;
+
+    const rateLimitResult = checkWsRateLimit(userId);
+    if (!rateLimitResult.allowed) {
+      logger.warn('WS reject: rate limited %s', userId);
+      return callback(false, 429);
+    }
+
     callback(true);
   } catch (err) {
     logger.warn('WS reject: invalid token - %s', err instanceof Error ? err.message : String(err));
@@ -62,79 +140,76 @@ function verifyClient(info: { req: import('http').IncomingMessage }, callback: (
 const wss = new WebSocketServer({ server: httpServer, verifyClient });
 
 // ═══════════════════════════════════════════════════════════════
-// 🏗️ SYSTEM INITIALIZATION - Following Omegle Architecture
+// 🏗️ STATE INIT (async)
 // ═══════════════════════════════════════════════════════════════
 
-const stateManager = new StateManager();
-const matchmaking = new MatchmakingService(stateManager);
+let stateManager: IStateManager;
+let matchmaking: MatchmakingService;
 
-const HEARTBEAT_INTERVAL = 15000; // 15 seconds
-const MAINTENANCE_INTERVAL = 30000; // 30 seconds
+async function initState() {
+  const redis = await getRedis();
+  if (redis && env.useRedis) {
+    stateManager = new RedisStateManager(redis);
+    logger.info('Using Redis state manager');
+  } else {
+    stateManager = new StateManager();
+    logger.info('Using in-memory state manager');
+  }
+  matchmaking = new MatchmakingService(stateManager);
+}
+
+const HEARTBEAT_INTERVAL = 15000;
+const MAINTENANCE_INTERVAL = 30000;
 
 // ═══════════════════════════════════════════════════════════════
-// 📡 MESSAGING UTILITIES
+// 📡 MESSAGING
 // ═══════════════════════════════════════════════════════════════
 
 function send(userId: string, message: ServerMessage): boolean {
-  const user = stateManager.getUser(userId);
-  if (!user || user.ws.readyState !== user.ws.OPEN) {
-    return false;
-  }
-
+  const ws = stateManager.getWs(userId);
+  if (!ws || ws.readyState !== ws.OPEN) return false;
   try {
-    user.ws.send(JSON.stringify(message));
+    ws.send(JSON.stringify(message));
     return true;
   } catch (error) {
-    logger.error(`Failed to send message to ${userId}:`, error);
+    logger.error(`Failed to send to ${userId}:`, error);
     return false;
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🎯 CORE MATCHMAKING FLOW
+// 🎯 MATCHMAKING
 // ═══════════════════════════════════════════════════════════════
 
-function attemptMatch(): void {
-  // Try to match as many pairs as possible in each mode
-  // The while loop ensures we consume the queue until < 2 users remain
-
-  // 1. Video Queue
+async function attemptMatch(): Promise<void> {
   let videoMatched = true;
   while (videoMatched) {
-    const sessionId = matchmaking.findMatch('video');
+    const sessionId = await matchmaking.findMatch('video');
     if (sessionId) {
-      const session = stateManager.getSession(sessionId);
-      if (session) {
-        handleMatchSuccess(session.userA, session.userB, sessionId, 'video');
-      }
+      const session = await stateManager.getSession(sessionId);
+      if (session) handleMatchSuccess(session.userA, session.userB, sessionId, 'video');
     } else {
       videoMatched = false;
     }
   }
 
-  // 2. Audio Queue
   let audioMatched = true;
   while (audioMatched) {
-    const sessionId = matchmaking.findMatch('audio');
+    const sessionId = await matchmaking.findMatch('audio');
     if (sessionId) {
-      const session = stateManager.getSession(sessionId);
-      if (session) {
-        handleMatchSuccess(session.userA, session.userB, sessionId, 'audio');
-      }
+      const session = await stateManager.getSession(sessionId);
+      if (session) handleMatchSuccess(session.userA, session.userB, sessionId, 'audio');
     } else {
       audioMatched = false;
     }
   }
 
-  // 3. Text Queue
   let textMatched = true;
   while (textMatched) {
-    const sessionId = matchmaking.findMatch('text');
+    const sessionId = await matchmaking.findMatch('text');
     if (sessionId) {
-      const session = stateManager.getSession(sessionId);
-      if (session) {
-        handleMatchSuccess(session.userA, session.userB, sessionId, 'text');
-      }
+      const session = await stateManager.getSession(sessionId);
+      if (session) handleMatchSuccess(session.userA, session.userB, sessionId, 'text');
     } else {
       textMatched = false;
     }
@@ -142,7 +217,6 @@ function attemptMatch(): void {
 }
 
 function handleMatchSuccess(userA: string, userB: string, sessionId: string, mode: 'video' | 'audio' | 'text'): void {
-  // Determine initiator (first user is initiator)
   const userARecord = stateManager.getUser(userA);
   const userBRecord = stateManager.getUser(userB);
 
@@ -153,26 +227,12 @@ function handleMatchSuccess(userA: string, userB: string, sessionId: string, mod
 
   const initiator = (userARecord.enqueuedAt || 0) <= (userBRecord.enqueuedAt || 0) ? userA : userB;
 
-  // Send match notifications
-  const sentA = send(userA, {
-    type: 'matched',
-    partnerId: userB,
-    initiator: initiator === userA,
-    sessionId
-  });
-
-  const sentB = send(userB, {
-    type: 'matched',
-    partnerId: userA,
-    initiator: initiator === userB,
-    sessionId
-  });
+  const sentA = send(userA, { type: 'matched', partnerId: userB, initiator: initiator === userA, sessionId });
+  const sentB = send(userB, { type: 'matched', partnerId: userA, initiator: initiator === userB, sessionId });
 
   if (!sentA || !sentB) {
-    logger.warn(`❌ Match notification failed for session ${sessionId} (A: ${sentA}, B: ${sentB}) - rolling back`);
+    logger.warn(`❌ Match notification failed for session ${sessionId} - rolling back`);
     stateManager.endSession(sessionId);
-
-    // Requeue the user who successfully received the message (if any)
     if (sentA) {
       matchmaking.enqueueUser(userA);
       send(userA, { type: 'error', message: 'Partner connection failed, searching again...' });
@@ -188,301 +248,242 @@ function handleMatchSuccess(userA: string, userB: string, sessionId: string, mod
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🧹 CLEANUP & DISCONNECTION HANDLING
+// 🧹 DISCONNECT
 // ═══════════════════════════════════════════════════════════════
 
-function handleUserDisconnect(userId: string): void {
+async function handleUserDisconnect(userId: string): Promise<void> {
   const user = stateManager.getUser(userId);
   if (!user) return;
 
-  // If user is in a session, notify partner
-  const partner = stateManager.getSessionPartner(userId);
+  const partner = await stateManager.getSessionPartner(userId);
   if (partner) {
     send(partner, { type: 'partner-left' });
-
-    // End session and requeue partner
     if (user.sessionId) {
-      stateManager.endSession(user.sessionId, userId);
+      await stateManager.endSession(user.sessionId, userId);
     }
-
-    // Auto-requeue partner at END of queue (FIFO rule)
     const partnerUser = stateManager.getUser(partner);
     if (partnerUser) {
-      const enqueueResult = matchmaking.enqueueUser(partner);
+      const enqueueResult = await matchmaking.enqueueUser(partner);
       if (enqueueResult.success) {
         send(partner, { type: 'queue', position: enqueueResult.queuePosition || 1 });
-        logger.info(`🔄 Partner ${partner} requeued at END after disconnect (FIFO)`);
-        attemptMatch();
+        logger.info(`🔄 Partner ${partner} requeued at END after disconnect`);
+        await attemptMatch();
       }
     }
   }
 
-  // Remove user completely
-  stateManager.removeUser(userId);
+  await stateManager.removeUser(userId);
   logger.info(`👋 User disconnected: ${userId}`);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🔌 WEBSOCKET CONNECTION HANDLING - Omegle Rules Implementation
+// 🔌 WEBSOCKET CONNECTION HANDLING
 // ═══════════════════════════════════════════════════════════════
 
 wss.on('connection', (ws, request) => {
   let userId: string;
 
-  try {
-    // Authentication
-    const url = new URL(request.url || '', `http://${request.headers.host}`);
-    const token = url.searchParams.get('token') || request.headers.authorization?.replace('Bearer ', '') || '';
-    if (!token) {
-      ws.close(4001, 'Missing token');
-      return;
-    }
-
-    const payload = verifyToken(token);
-    userId = payload.userId;
-
-    // Add user to state manager
-    stateManager.addUser(userId, ws);
-    send(userId, { type: 'ready', userId });
-
-    logger.info(`🔌 User connected: ${userId}`);
-
-    // ═══════════════════════════════════════════════════════════════
-    // 📨 MESSAGE HANDLING - Following Omegle Protocol Rules
-    // ═══════════════════════════════════════════════════════════════
-
-    ws.on('message', (raw) => {
-      let message: ClientMessage;
-
-      try {
-        message = JSON.parse(raw.toString()) as ClientMessage;
-      } catch (err) {
-        send(userId, { type: 'error', message: 'Invalid message format' });
+  (async () => {
+    try {
+      const url = new URL(request.url || '', `http://${request.headers.host}`);
+      const token = url.searchParams.get('token') || request.headers.authorization?.replace('Bearer ', '') || '';
+      if (!token) {
+        ws.close(4001, 'Missing token');
         return;
       }
 
-      // Update user activity
-      stateManager.updateLastPong(userId);
+      const payload = verifyToken(token);
+      userId = payload.userId;
 
-      switch (message.type) {
-        // ───────────────────────────────────────────────────────────
-        // 1️⃣ JOIN QUEUE - Enqueue Rules Implementation
-        // ───────────────────────────────────────────────────────────
-        case 'join': {
-          const mode = message.mode || 'video';
-          stateManager.setMode(userId, mode);
+      await stateManager.addUser(userId, ws);
+      send(userId, { type: 'ready', userId });
 
-          const result = matchmaking.enqueueUser(userId);
+      logger.info(`🔌 User connected: ${userId}`);
 
-          if (!result.success) {
-            send(userId, { type: 'error', message: result.reason || 'Cannot join queue' });
-            break;
-          }
-
-          // Send queue position
-          send(userId, { type: 'queue', position: result.queuePosition || 1 });
-          logger.info(`📥 ${userId} joined ${mode} queue (position: ${result.queuePosition})`);
-
-          // Attempt matchmaking
-          attemptMatch();
-          break;
+      ws.on('message', async (raw) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw.toString());
+        } catch {
+          send(userId, { type: 'error', message: 'Invalid message format' });
+          return;
         }
 
-        // ───────────────────────────────────────────────────────────
-        // 2️⃣ CANCEL SEARCH - Dequeue Rules
-        // ───────────────────────────────────────────────────────────
-        case 'cancel': {
-          const success = matchmaking.cancelSearch(userId);
-          if (success) {
-            send(userId, { type: 'search-cancelled' });
-            logger.info(`🚫 ${userId} cancelled search`);
-          }
-          break;
+        const validation = validateClientMessage(parsed);
+        if (!validation.valid) {
+          send(userId, { type: 'error', message: validation.error || 'Invalid message' });
+          return;
         }
 
-        // ───────────────────────────────────────────────────────────
-        // 3️⃣ SESSION ACKNOWLEDGMENT - 1-to-1 Session Rules
-        // ───────────────────────────────────────────────────────────
-        case 'acknowledge': {
-          const sessionReady = stateManager.acknowledgeSession(userId);
-          if (sessionReady) {
-            const partner = stateManager.getSessionPartner(userId);
-            if (partner) {
-              // Notify both users that session is fully active
-              send(userId, { type: 'session-ready' });
-              send(partner, { type: 'session-ready' });
-              logger.info(`✅ Session ready: ${userId} <-> ${partner}`);
+        const message = (validation.message || parsed) as ClientMessage;
+        await stateManager.updateLastPong(userId);
+
+        switch (message.type) {
+          case 'join': {
+            const mode = message.mode || 'video';
+            await stateManager.setMode(userId, mode);
+            const result = await matchmaking.enqueueUser(userId);
+            if (!result.success) {
+              send(userId, { type: 'error', message: result.reason || 'Cannot join queue' });
+              break;
             }
-          }
-          break;
-        }
-
-        // ───────────────────────────────────────────────────────────
-        // 4️⃣ WEBRTC SIGNALING - Active Session Only
-        // ───────────────────────────────────────────────────────────
-        case 'signal': {
-          const session = stateManager.getUserSession(userId);
-          if (!session) {
-            send(userId, { type: 'error', message: 'No active session for signaling' });
+            send(userId, { type: 'queue', position: result.queuePosition || 1 });
+            logger.info(`📥 ${userId} joined ${mode} queue (position: ${result.queuePosition})`);
+            await attemptMatch();
             break;
           }
 
-          // Allow signaling as soon as session exists (pending or active) so first offer isn't dropped
-          if (session.state !== 'pending' && session.state !== 'active') {
-            send(userId, { type: 'error', message: 'Session not ready for signaling' });
-            break;
-          }
-
-          const partner = stateManager.getSessionPartner(userId);
-          if (!partner) {
-            send(userId, { type: 'error', message: 'Partner not found' });
-            break;
-          }
-
-          // Forward signal to partner
-          send(partner, {
-            type: 'signal',
-            from: userId,
-            signalType: message.signalType,
-            data: message.data,
-          });
-
-          // Update session activity
-          if (session) {
-            session.lastActivity = Date.now();
-          }
-          break;
-        }
-
-        // ───────────────────────────────────────────────────────────
-        // 5️⃣ SKIP PARTNER - Skip Rules Implementation
-        // ───────────────────────────────────────────────────────────
-        case 'skip': {
-          const skipResult = stateManager.handleSkip(userId);
-
-          if (!skipResult.success) {
-            send(userId, { type: 'error', message: skipResult.reason || 'Cannot skip' });
-            break;
-          }
-
-          // Notify partner they were skipped
-          if (skipResult.partner) {
-            send(skipResult.partner, { type: 'partner-skipped' });
-
-            // Requeue skipped partner at END of queue (FIFO rule)
-            // Note: Their mode remains set from previous join
-            const partnerEnqueue = matchmaking.enqueueUser(skipResult.partner);
-            if (partnerEnqueue.success) {
-              send(skipResult.partner, { type: 'queue', position: partnerEnqueue.queuePosition || 1 });
+          case 'cancel': {
+            const success = await matchmaking.cancelSearch(userId);
+            if (success) {
+              send(userId, { type: 'search-cancelled' });
+              logger.info(`🚫 ${userId} cancelled search`);
             }
-          }
-
-          // Requeue skipper at END of queue (FIFO rule - no priority for skipping)
-          const userEnqueue = matchmaking.enqueueUser(userId);
-          if (userEnqueue.success) {
-            send(userId, { type: 'queue', position: userEnqueue.queuePosition || 1 });
-          }
-
-          logger.info(`⏭️ ${userId} skipped partner ${skipResult.partner} (both requeued at end)`);
-
-          // Attempt new matches
-          attemptMatch();
-          break;
-        }
-
-        // ───────────────────────────────────────────────────────────
-        // 6️⃣ LEAVE SYSTEM - Disconnect Rules
-        // ───────────────────────────────────────────────────────────
-        case 'leave': {
-          handleUserDisconnect(userId);
-          break;
-        }
-
-        // ───────────────────────────────────────────────────────────
-        // 7️⃣ HEARTBEAT - Connection Health
-        // ───────────────────────────────────────────────────────────
-        case 'pong': {
-          stateManager.updateLastPong(userId);
-          break;
-        }
-
-        // ───────────────────────────────────────────────────────────
-        // FUN REQUEST / ACCEPT / REJECT - Forward to partner
-        // ───────────────────────────────────────────────────────────
-        case 'fun-request': {
-          const session = stateManager.getUserSession(userId);
-          const partner = session ? stateManager.getSessionPartner(userId) : null;
-          if (!partner) {
-            send(userId, { type: 'error', message: 'No active session for fun request' });
             break;
           }
-          const game = (message as any).game || 'chess';
-          send(partner, { type: 'fun-request', from: userId, game });
-          break;
-        }
-        case 'fun-accept': {
-          const session = stateManager.getUserSession(userId);
-          const partner = session ? stateManager.getSessionPartner(userId) : null;
-          if (!partner) break;
-          const game = (message as any).game || 'chess';
-          send(partner, { type: 'fun-accept', from: userId, game });
-          break;
-        }
-        case 'fun-reject': {
-          const session = stateManager.getUserSession(userId);
-          const partner = session ? stateManager.getSessionPartner(userId) : null;
-          if (!partner) break;
-          send(partner, { type: 'fun-reject', from: userId });
-          break;
-        }
-        case 'fun-exit': {
-          const session = stateManager.getUserSession(userId);
-          const partner = session ? stateManager.getSessionPartner(userId) : null;
-          if (!partner) break;
-          send(partner, { type: 'fun-exit', from: userId });
-          break;
-        }
 
-        default: {
-          send(userId, { type: 'error', message: `Unsupported message type: ${(message as any).type}` });
+          case 'acknowledge': {
+            const sessionReady = await stateManager.acknowledgeSession(userId);
+            if (sessionReady) {
+              const partner = await stateManager.getSessionPartner(userId);
+              if (partner) {
+                send(userId, { type: 'session-ready' });
+                send(partner, { type: 'session-ready' });
+                logger.info(`✅ Session ready: ${userId} <-> ${partner}`);
+              }
+            }
+            break;
+          }
+
+          case 'signal': {
+            const session = await stateManager.getUserSession(userId);
+            if (!session) {
+              send(userId, { type: 'error', message: 'No active session for signaling' });
+              break;
+            }
+            if (session.state !== 'pending' && session.state !== 'active') {
+              send(userId, { type: 'error', message: 'Session not ready for signaling' });
+              break;
+            }
+            const partner = await stateManager.getSessionPartner(userId);
+            if (!partner) {
+              send(userId, { type: 'error', message: 'Partner not found' });
+              break;
+            }
+            send(partner, {
+              type: 'signal',
+              from: userId,
+              signalType: message.signalType,
+              data: message.data,
+            });
+            break;
+          }
+
+          case 'skip': {
+            const skipResult = await stateManager.handleSkip(userId);
+            if (!skipResult.success) {
+              send(userId, { type: 'error', message: skipResult.reason || 'Cannot skip' });
+              break;
+            }
+            if (skipResult.partner) {
+              send(skipResult.partner, { type: 'partner-skipped' });
+              const partnerEnqueue = await matchmaking.enqueueUser(skipResult.partner);
+              if (partnerEnqueue.success) {
+                send(skipResult.partner, { type: 'queue', position: partnerEnqueue.queuePosition || 1 });
+              }
+            }
+            const userEnqueue = await matchmaking.enqueueUser(userId);
+            if (userEnqueue.success) {
+              send(userId, { type: 'queue', position: userEnqueue.queuePosition || 1 });
+            }
+            logger.info(`⏭️ ${userId} skipped partner ${skipResult.partner} (both requeued at end)`);
+            await attemptMatch();
+            break;
+          }
+
+          case 'leave': {
+            await handleUserDisconnect(userId);
+            break;
+          }
+
+          case 'pong': {
+            await stateManager.updateLastPong(userId);
+            break;
+          }
+
+          case 'fun-request': {
+            const session = await stateManager.getUserSession(userId);
+            const partner = session ? await stateManager.getSessionPartner(userId) : null;
+            if (!partner) {
+              send(userId, { type: 'error', message: 'No active session for fun request' });
+              break;
+            }
+            const game = (message as { game?: string }).game || 'chess';
+            send(partner, { type: 'fun-request', from: userId, game });
+            break;
+          }
+
+          case 'fun-accept': {
+            const session = await stateManager.getUserSession(userId);
+            const partner = session ? await stateManager.getSessionPartner(userId) : null;
+            if (!partner) break;
+            const game = (message as { game?: string }).game || 'chess';
+            send(partner, { type: 'fun-accept', from: userId, game });
+            break;
+          }
+
+          case 'fun-reject': {
+            const session = await stateManager.getUserSession(userId);
+            const partner = session ? await stateManager.getSessionPartner(userId) : null;
+            if (!partner) break;
+            send(partner, { type: 'fun-reject', from: userId });
+            break;
+          }
+
+          case 'fun-exit': {
+            const session = await stateManager.getUserSession(userId);
+            const partner = session ? await stateManager.getSessionPartner(userId) : null;
+            if (!partner) break;
+            send(partner, { type: 'fun-exit', from: userId });
+            break;
+          }
+
+          default:
+            send(userId, { type: 'error', message: `Unsupported message type: ${(message as { type: string }).type}` });
         }
-      }
-    });
+      });
 
-    // ═══════════════════════════════════════════════════════════════
-    // 🔌 CONNECTION LIFECYCLE EVENTS
-    // ═══════════════════════════════════════════════════════════════
+      ws.on('close', (code, reason) => {
+        handleUserDisconnect(userId);
+        logger.info(`🔌 Connection closed: ${userId} (${code}: ${reason})`);
+      });
 
-    ws.on('close', (code, reason) => {
-      handleUserDisconnect(userId);
-      logger.info(`🔌 Connection closed: ${userId} (${code}: ${reason})`);
-    });
-
-    ws.on('error', (error) => {
-      logger.error(`🔌 WebSocket error for ${userId}:`, error);
-      handleUserDisconnect(userId);
-    });
-
-  } catch (error) {
-    logger.error('🔌 Connection setup failed:', error);
-    ws.close(4002, 'Authentication failed');
-  }
+      ws.on('error', (error) => {
+        logger.error(`🔌 WebSocket error for ${userId}:`, error);
+        handleUserDisconnect(userId);
+      });
+    } catch (error) {
+      logger.error('🔌 Connection setup failed:', error);
+      ws.close(4002, 'Authentication failed');
+    }
+  })();
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ❤️ HEARTBEAT SYSTEM - Ghost User Prevention
+// ❤️ HEARTBEAT
 // ═══════════════════════════════════════════════════════════════
 
-const heartbeatTimer = setInterval(() => {
-  const stats = stateManager.getStats();
-
-  logger.info(`💓 Heartbeat: ${stats.totalUsers} users, ${stats.activeSessions} sessions, V:${stats.searchingVideo}/A:${stats.searchingAudio}/T:${stats.searchingText} searching`);
+const heartbeatTimer = setInterval(async () => {
+  const stats = await stateManager.getStats();
+  logger.info(
+    `💓 Heartbeat: ${stats.totalUsers} users, ${stats.activeSessions} sessions, V:${stats.searchingVideo}/A:${stats.searchingAudio}/T:${stats.searchingText} searching`
+  );
 
   wss.clients.forEach((ws) => {
     if (ws.readyState === ws.OPEN) {
       try {
         ws.send(JSON.stringify({ type: 'ping' }));
-      } catch (error) {
+      } catch {
         // silent
       }
     }
@@ -490,55 +491,48 @@ const heartbeatTimer = setInterval(() => {
 }, HEARTBEAT_INTERVAL);
 
 // ═══════════════════════════════════════════════════════════════
-// 🧹 MAINTENANCE SYSTEM - System Health & Cleanup
+// 🧹 MAINTENANCE
 // ═══════════════════════════════════════════════════════════════
 
-const maintenanceTimer = setInterval(() => {
+const maintenanceTimer = setInterval(async () => {
   try {
-    matchmaking.performMaintenance();
-
-    const stats = matchmaking.getStats();
+    await matchmaking.performMaintenance();
+    const stats = await matchmaking.getStats();
     logger.debug(`📊 System stats:`, stats);
-
-    // Log warnings if queue is getting large
     if (stats.searchingUsers > 50) {
       logger.warn(`⚠️ Large queue detected: ${stats.searchingUsers} users waiting`);
     }
-
   } catch (error) {
     logger.error('🧹 Maintenance error:', error);
   }
 }, MAINTENANCE_INTERVAL);
 
 // ═══════════════════════════════════════════════════════════════
-// 🔄 GRACEFUL SHUTDOWN - Cleanup All Resources
+// 🔄 GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════════════════════════
 
-function gracefulShutdown(signal: string) {
+async function gracefulShutdown(signal: string) {
   logger.info(`📴 ${signal} received - shutting down gracefully`);
 
-  // Clear timers
   clearInterval(heartbeatTimer);
   clearInterval(maintenanceTimer);
 
-  // Notify all connected users
-  const stats = stateManager.getStats();
+  const stats = await stateManager.getStats();
   logger.info(`📴 Disconnecting ${stats.totalUsers} users...`);
 
-  // Close all WebSocket connections
   wss.clients.forEach((ws) => {
     if (ws.readyState === ws.OPEN) {
       ws.close(1001, 'Server shutting down');
     }
   });
 
-  // Close HTTP server
+  await closeRedis();
+
   httpServer.close(() => {
     logger.info('📴 Server shutdown complete');
     process.exit(0);
   });
 
-  // Force exit after 10 seconds
   setTimeout(() => {
     logger.error('📴 Forced shutdown after timeout');
     process.exit(1);
@@ -547,28 +541,33 @@ function gracefulShutdown(signal: string) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
   logger.error('💥 Uncaught Exception:', error);
   gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
-
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 🚀 SERVER STARTUP
+// 🚀 STARTUP
 // ═══════════════════════════════════════════════════════════════
 
-httpServer.listen({ port: env.port, backlog: 2048 }, () => {
-  logger.info(`🚀 UniTalks Server started`);
-  logger.info(`📡 HTTP server: http://localhost:${env.port}`);
-  logger.info(`🔌 WebSocket: ws://localhost:${env.port}/ws`);
-  logger.info(`🎯 Environment: ${env.nodeEnv}`);
-  logger.info(`❤️ Heartbeat: ${HEARTBEAT_INTERVAL}ms`);
-  logger.info(`🧹 Maintenance: ${MAINTENANCE_INTERVAL}ms`);
-  logger.info('');
-  logger.info('🎉 Ready to match users following Omegle-like rules!');
-});
+initState()
+  .then(() => {
+    httpServer.listen({ port: env.port, backlog: 2048 }, () => {
+      logger.info(`🚀 UniTalks Server started`);
+      logger.info(`📡 HTTP server: http${env.httpsEnabled ? 's' : ''}://localhost:${env.port}`);
+      logger.info(`🔌 WebSocket: ws${env.httpsEnabled ? 's' : ''}://localhost:${env.port}/ws`);
+      logger.info(`🧊 ICE config: /api/ice/config`);
+      logger.info(`🎯 Environment: ${env.nodeEnv}`);
+      logger.info(`❤️ Heartbeat: ${HEARTBEAT_INTERVAL}ms`);
+      logger.info(`🧹 Maintenance: ${MAINTENANCE_INTERVAL}ms`);
+      logger.info('');
+      logger.info('🎉 Ready to match users following Omegle-like rules!');
+    });
+  })
+  .catch((err) => {
+    logger.error('Failed to start server:', err);
+    process.exit(1);
+  });

@@ -1,7 +1,6 @@
 /**
- * Free STUN servers for WebRTC. Used one-at-a-time; if connection establishment
- * takes longer than ESTABLISHMENT_DELAY_THRESHOLD_MS, the next connection (e.g. after skip)
- * will try the next server in the list until a faster one is found.
+ * WebRTC ICE configuration.
+ * Fetches from /api/ice/config when available (includes TURN), falls back to STUN-only.
  */
 export const ESTABLISHMENT_DELAY_THRESHOLD_MS = 2500;
 
@@ -25,13 +24,52 @@ export const STUN_SERVERS = [
   { urls: 'stun:stun.nextcloud.com:443' },
 ];
 
+let cachedIceConfig = null;
+
+/**
+ * Fetch ICE config from backend (STUN + TURN when configured)
+ */
+export async function fetchIceConfig() {
+  if (cachedIceConfig) return cachedIceConfig;
+  const baseUrl = process.env.REACT_APP_API_URL || '';
+  if (!baseUrl) {
+    cachedIceConfig = { iceServers: STUN_SERVERS.slice(0, 3), iceTransportPolicy: 'all' };
+    return cachedIceConfig;
+  }
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/ice/config`);
+    if (res.ok) {
+      const data = await res.json();
+      cachedIceConfig = {
+        iceServers: data.iceServers || STUN_SERVERS.slice(0, 3),
+        iceTransportPolicy: data.iceTransportPolicy || 'all',
+      };
+      return cachedIceConfig;
+    }
+  } catch (err) {
+    console.warn('ICE config fetch failed, using fallback:', err);
+  }
+  cachedIceConfig = { iceServers: STUN_SERVERS.slice(0, 3), iceTransportPolicy: 'all' };
+  return cachedIceConfig;
+}
+
 /**
  * @param {number} serverIndex - Current STUN server index (0-based). Rotate when establishment delay > threshold.
  * @returns {{ iceServers: Array<{ urls: string }> }}
  */
 export function getRtcConfig(serverIndex) {
-  const index = Math.abs(serverIndex) % STUN_SERVERS.length;
+  const index = Math.abs(serverIndex || 0) % STUN_SERVERS.length;
   return {
     iceServers: [STUN_SERVERS[index]],
   };
+}
+
+/**
+ * Get RTC config - prefers API config (with TURN) when available, else fallback
+ */
+export function getRtcConfigWithApi(serverIndex) {
+  if (cachedIceConfig) {
+    return { iceServers: cachedIceConfig.iceServers, iceTransportPolicy: cachedIceConfig.iceTransportPolicy };
+  }
+  return getRtcConfig(serverIndex);
 }

@@ -5,7 +5,7 @@ import { FiVideo, FiMic, FiMicOff, FiSkipForward, FiSkipBack, FiUsers, FiSend, F
 import SimplePeer from 'simple-peer';
 import Header from '../layout/Header';
 import { socketService } from '../../utils/socketService';
-import { getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
+import { fetchIceConfig, getRtcConfigWithApi, getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
 import { createInitialState, applyMove as applyChessMove } from '../../utils/chessEngine';
 import ChessBoard from '../ui/ChessBoard';
 
@@ -1715,11 +1715,13 @@ function VideoChat() {
         return;
       }
 
+      await fetchIceConfig();
+      const rtcConfig = getRtcConfigWithApi(stunServerIndexRef.current) || getRtcConfig(stunServerIndexRef.current);
       const peer = new SimplePeer({
         initiator: isInitiator,
         trickle: true,
         stream: localStreamRef.current,
-        config: getRtcConfig(stunServerIndexRef.current),
+        config: rtcConfig,
       });
       peerConnectionRef.current = peer;
       isInitiatorRef.current = isInitiator;
@@ -2470,11 +2472,14 @@ function VideoChat() {
     };
 
     const handleError = (error) => {
-      // Suppress all visible UI errors as requested, especially "Already in session"
-      const msg = error.message || error?.data || '';
-      if (!msg.toLowerCase().includes('already in session') && !msg.toLowerCase().includes('already searching')) {
-        console.error('WS error:', error);
+      const msg = String(error?.message || error?.data || '');
+      const lower = msg.toLowerCase();
+      // Suppress benign/expected errors
+      if (lower.includes('already in session') || lower.includes('already searching') ||
+          lower.includes('invalid message') || lower.includes('session not ready')) {
+        return;
       }
+      if (msg) console.warn('[ws] Server error:', msg);
     };
 
     const handleFunRequest = (msg) => {

@@ -1,0 +1,16 @@
+{
+  "name": "unitalks-load-test-webrtc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright-based WebRTC load test with synthetic media",
+  "scripts": {
+    "test": "node load-test.js",
+    "test:single": "node load-test.js --vus 1 --duration 60",
+    "test:light": "node load-test.js --vus 3 --duration 120",
+    "test:heavy": "node load-test.js --vus 10 --duration 180",
+    "test:1000": "node load-test-1000.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}

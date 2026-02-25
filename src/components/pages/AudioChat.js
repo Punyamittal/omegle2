@@ -5,7 +5,7 @@ import { FiMic, FiMicOff, FiUsers, FiSend, FiSmile, FiHeadphones, FiMessageCircl
 import SimplePeer from 'simple-peer';
 import Header from '../layout/Header';
 import { socketService } from '../../utils/socketService';
-import { getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
+import { fetchIceConfig, getRtcConfigWithApi, getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
 import { createInitialState, applyMove as applyChessMove } from '../../utils/chessEngine';
 import ChessBoard from '../ui/ChessBoard';
 import AudioVisualizer from '../ui/AudioVisualizer';
@@ -1426,11 +1426,13 @@ function AudioChat() {
         return;
       }
 
+      await fetchIceConfig();
+      const rtcConfig = getRtcConfigWithApi(stunServerIndexRef.current) || getRtcConfig(stunServerIndexRef.current);
       const peer = new SimplePeer({
         initiator: isInitiator,
         trickle: true,
         stream: localStreamRef.current,
-        config: getRtcConfig(stunServerIndexRef.current),
+        config: rtcConfig,
       });
       peerConnectionRef.current = peer;
       isInitiatorRef.current = isInitiator;

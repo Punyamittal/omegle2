@@ -7,20 +7,27 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:cluster": "node dist/cluster.js",
     "type-check": "tsc --noEmit"
   },
   "keywords": ["webrtc", "video-chat", "signaling", "ws"],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.3.2",
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.1",
-    "ws": "^8.17.1"
+    "ws": "^8.17.1",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.5",

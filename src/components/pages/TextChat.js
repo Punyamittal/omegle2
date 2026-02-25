@@ -5,7 +5,7 @@ import { FiSend, FiSmile, FiMessageCircle, FiSquare, FiSkipForward } from 'react
 import SimplePeer from 'simple-peer';
 import Header from '../layout/Header';
 import { socketService } from '../../utils/socketService';
-import { getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
+import { fetchIceConfig, getRtcConfigWithApi, getRtcConfig, ESTABLISHMENT_DELAY_THRESHOLD_MS, STUN_SERVERS } from '../../utils/webrtcStun';
 
 // Minimal process polyfill for simple-peer in browser builds
 if (typeof window !== 'undefined') {
@@ -541,10 +541,12 @@ function TextChat() {
 
   const setupWebRTC = async (isInitiator) => {
     try {
+      await fetchIceConfig();
+      const rtcConfig = getRtcConfigWithApi(stunServerIndexRef.current) || getRtcConfig(stunServerIndexRef.current);
       const peer = new SimplePeer({
         initiator: isInitiator,
         trickle: true,
-        config: getRtcConfig(stunServerIndexRef.current),
+        config: rtcConfig,
       });
       peerConnectionRef.current = peer;
       isInitiatorRef.current = isInitiator;
