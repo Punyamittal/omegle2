@@ -1,113 +1,121 @@
 ![Project Banner](docs/readme-agent/banner.svg)
 
-# UniTalks - Frontend Application
+# Anonymous WebRTC Video Chat Platform
 
-A modern, clean frontend application for the UniTalks college social platform with essential pages and components.
+A full-stack application providing anonymous video chat functionality using WebSockets for signaling and Playwright for load testing.
 
-## Features
+## Overview
 
-- **Homepage** - Modern landing page with animated elements
-- **Start Chat** - Chat mode selection page
-- **About** - Information about the platform
-- **Privacy Policy** - Comprehensive privacy policy
-- **Terms of Service** - Terms and conditions
-- **Help Center** - Support and bug reporting
-- **Contact** - Contact form
-- **Video Chat** - Video chat interface
-- **Maintenance Pages** - Coming soon pages for voice and text chat
+This project implements a real-time, anonymous video chat platform. The system is composed of a robust backend server responsible for WebRTC signaling, user authentication, and matchmaking queue management, and a separate client application (implied by the React entry point). A dedicated load testing suite uses Playwright to validate the scalability and performance of the backend under various concurrent user loads.
 
-## Project Structure
+## Problem
 
-```
-src/
-├── components/
-│   ├── layout/
-│   │   ├── Header.js          # Navigation header component
-│   │   └── Footer.js           # Site footer component
-│   ├── pages/
-│   │   ├── Homepage.js        # Landing page
-│   │   ├── StartChat.js       # Chat mode selection
-│   │   ├── About.js           # About page
-│   │   ├── Privacy.js          # Privacy policy
-│   │   ├── Terms.js            # Terms of service
-│   │   ├── Help.js             # Help center
-│   │   ├── Contact.js          # Contact form
-│   │   ├── VideoChat.js        # Video chat interface
-│   │   └── MaintenancePage.js  # Maintenance/coming soon pages
-│   └── ui/
-│       ├── ReportBugModal.js   # Bug reporting modal
-│       └── UniversalHamburger.js # Mobile navigation menu
-├── config/
-│   └── theme.js               # Theme configuration
-├── utils/
-│   └── performanceOptimizations.js # Performance utilities
-├── App.js                     # Main app component with routing
-└── index.js                   # Application entry point
-```
+The need for a scalable, real-time platform that facilitates anonymous video communication, requiring reliable signaling, session management, and robust performance under high concurrency.
 
-## Setup
+## Solution
 
-1. Install dependencies:
-```bash
+The solution consists of a TypeScript/Express backend that manages the WebRTC signaling process via WebSockets. It uses JWT for authentication and implements a FIFO matchmaking queue to pair users automatically. The system is designed to be scalable, with dedicated load testing scripts to ensure stability when handling thousands of concurrent connections.
+
+## Key Features
+
+- Anonymous video chat sessions
+- JWT-based user authentication
+- WebSockets signaling for WebRTC (offer/answer/ICE exchange)
+- FIFO matchmaking queue system
+- Heartbeat mechanism for connection monitoring
+- Auto-requeue functionality for failed sessions
+- Load testing capabilities for simulating high concurrency (up to 1000 users)
+
+## Technology Stack
+
+- TypeScript
+- React
+- Express
+- WebSockets
+- WebRTC
+- jsonwebtoken
+- dotenv
+- ioredis
+- Playwright
+
+# 📚 Project Documentation Overview
+
+This repository appears to contain documentation and code snippets for multiple, distinct projects, including a Web3 Chat/Video application, a video streaming service (Omegle), and a complex Data Analytics/Metrics Dashboard. 
+
+Please refer to the specific sections below for details on each module.
+
+***
+
+## 💬 UniTalks / Web3 Forms (Chat & Video Application)
+
+This module describes a comprehensive, modern chat and video communication platform built with React and Styled Components. It focuses on providing a responsive and feature-rich user experience, including dark mode support and various chat functionalities.
+
+### ✨ Features
+*   **Video Chat:** Dedicated component for real-time video communication (`VideoChat.js`).
+*   **Chat Functionality:** Supports standard messaging and chat history.
+*   **Theming:** Includes support for a dark theme.
+*   **Responsiveness:** Designed to work across various screen sizes.
+*   **Web3 Integration:** Implies integration with decentralized web technologies (Web3Forms).
+
+### 🚀 Getting Started
+
+To set up and run the UniTalks application:
+
+1.  **Installation:**
+    ```bash
 npm install
-```
-
-2. Start the development server:
-```bash
+    ```
+2.  **Running the Application:**
+    ```bash
 npm start
-```
+    ```
 
-3. Build for production:
-```bash
-npm run build
-```
+### 📁 Core Components
+*   `StartChat.js`: Likely the main entry point for initiating a chat session.
+*   `About.js`: Component for displaying information about the application.
+*   `VideoChat.js`: Handles the core video conferencing logic.
+*   `Styled Components`: Used for managing the application's styling and themes.
 
-## Dependencies
+***
 
-- **React** 18.2.0 - UI library
-- **React Router DOM** 6.22.0 - Routing
-- **Styled Components** 6.1.8 - CSS-in-JS styling
-- **React Icons** 5.2.1 - Icon library
-- **Socket.IO Client** 4.7.2 - WebSocket client (for future features)
-- **Web Vitals** 3.5.0 - Performance monitoring
+## 📹 Omegle Clone / Video Streaming Service
 
-## Features
+This section outlines the structure for a real-time video streaming application, similar to Omegle. It suggests a separation between the frontend client and the backend server logic.
 
-- ✅ Responsive design
-- ✅ Dark theme with Spotify green accents
-- ✅ Mobile-first approach
-- ✅ Clean, modern UI
-- ✅ Bug reporting functionality
-- ✅ Contact forms
-- ✅ SEO optimized
-- ✅ Performance optimizations for low-powered devices
+### ⚙️ Architecture
+*   **Frontend:** Handles the user interface and video capture/display.
+*   **Backend:** Manages the connection logic, user pairing, and streaming data.
 
-## Environment Variables
+### 🚀 Setup Guide
 
-Create a `.env` file in the root directory:
+*   **Frontend Setup:** The client-side application needs to be initialized and run.
+*   **Backend Setup:** The server component must be configured to handle real-time connections (e.g., WebSockets).
 
-```
-REACT_APP_WEB3FORMS_KEY=your_web3forms_key_here
-```
+***
 
-This is used for the bug reporting and contact forms.
+## 📊 Data Analytics & Metrics Dashboard
 
-## Code Organization
+This module describes a sophisticated, data-intensive dashboard designed for monitoring system health, security threats, and operational metrics. It utilizes complex data flow and multiple interconnected components.
 
-The project follows a modern, organized structure:
+### 📈 Key Monitoring Areas
+*   **Risk Trajectory:** Visualizing the progression and severity of identified risks.
+*   **Attack Detection Stats:** Providing real-time statistics and visualizations related to security breaches or attempted attacks.
+*   **System Metrics:** Tracking general operational data and performance indicators.
 
-- **Layout Components** (`components/layout/`) - Reusable layout components like Header and Footer
-- **Page Components** (`components/pages/`) - Individual page components
-- **UI Components** (`components/ui/`) - Reusable UI components like modals and menus
-- **Config** (`config/`) - Configuration files like theme
-- **Utils** (`utils/`) - Utility functions
+### 🗺️ System Architecture (Conceptual Flow)
 
-## License
+The system relies on a multi-stage data pipeline:
 
-All rights reserved to UniTalks.
-# omegle
-# omegle
-# omegle2
+1.  **Data Sources:** Raw data is ingested from various sources (e.g., logs, sensors, APIs).
+2.  **Processing Layer:** Data undergoes cleaning, transformation, and aggregation.
+3.  **Storage:** Processed data is stored in a structured manner.
+4.  **Presentation:** The dashboard consumes the processed data to render visualizations and alerts.
+
+### 🧩 Components
+*   **Datasets:** The core data repositories used by the dashboard.
+*   **Risk Trajectory Component:** Visualizes risk over time.
+*   **Attack Detection Component:** Displays security statistics and alerts.
+*   **Dashboard Pages:** The front-end views that consume the data and present the insights.
 
 ## Setup Guide
 
@@ -162,7 +170,7 @@ High-level system design, data flows, API map, and workflow pipelines derived fr
 ```mermaid
 graph TB
     subgraph Client["Client Layer"]
-        user["User / Operator"]
+        user["User"]
         api_client["API / CLI Client"]
     end
 
@@ -173,7 +181,7 @@ graph TB
         datasets["Datasets · JSON · CSV"]
     end
 
-    subgraph Charts["Metrics & Dashboard Charts"]
+    subgraph Charts["omegle2 — Metrics & Views"]
         risk_trajectory["Risk trajectory chart"]
         attack_stats["Attack detection stats"]
         eval_metrics["Evaluation metrics"]
@@ -182,8 +190,6 @@ graph TB
 
     user --> api_client
     api_client --> Core
-    user -->|Web UI| dashboard_kpis
-    Core --> risk_trajectory
     risk_trajectory --> user
 ```
 
@@ -191,7 +197,7 @@ graph TB
 
 ```mermaid
 flowchart LR
-    U["User / Event"] --> IN["Untrusted Input"]
+    U["User / Event"] --> IN["Input Data"]
 
     subgraph Pipeline["Processing Pipeline"]
         p0["Input"]
@@ -201,7 +207,7 @@ flowchart LR
         p1 --> p2
     end
 
-    subgraph Metrics["Metrics & Chart Feeds"]
+    subgraph Metrics["omegle2 — Views & Metrics"]
         risk_trajectory["Risk trajectory chart"]
         attack_stats["Attack detection stats"]
         eval_metrics["Evaluation metrics"]
@@ -209,7 +215,7 @@ flowchart LR
     end
 
     IN --> p0
-    p2 --> OUT["Authorized Output"]
+    p2 --> OUT["Output"]
     OUT --> U
     p2 --> risk_trajectory
     risk_trajectory --> U
@@ -219,7 +225,7 @@ flowchart LR
 
 ```mermaid
 graph LR
-    subgraph App["src Components"]
+    subgraph App["omegle2 Components"]
         main["main<br/>Main"]
     end
 ```
@@ -253,4 +259,4 @@ Screenshots captured from the running application. Each page is listed with its 
 
 Home — application page at `/`
 
-![Home](docs/readme-agent/pages/dashboard.png)
+![Home](docs/readme-agent/pages/home.png)
