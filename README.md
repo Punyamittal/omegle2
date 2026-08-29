@@ -1,3 +1,5 @@
+![Project Banner](docs/readme-agent/banner.svg)
+
 # UniTalks - Frontend Application
 
 A modern, clean frontend application for the UniTalks college social platform with essential pages and components.
@@ -106,3 +108,149 @@ All rights reserved to UniTalks.
 # omegle
 # omegle
 # omegle2
+
+## Setup Guide
+
+### Backend Setup
+
+_From `README.md`:_
+
+
+1. Install dependencies:
+```bash
+npm install
+```
+
+2. Start the development server:
+```bash
+npm start
+```
+
+3. Build for production:
+```bash
+npm run build
+```
+
+
+### Frontend Setup
+
+```bash
+
+npm install
+npm run dev     # development
+npm run build && npm start   # production
+```
+
+Open `http://127.0.0.1:3000` (or the port shown in the terminal).
+
+### Running the Application
+
+1. **Start web app** — `npm run start` in `./`
+
+```bash
+cd .
+npm install
+npm run start
+```
+
+## System Architecture
+
+High-level system design, data flows, API map, and workflow pipelines derived from the repository structure.
+
+### System Architecture
+
+```mermaid
+graph TB
+    subgraph Client["Client Layer"]
+        user["User / Operator"]
+        api_client["API / CLI Client"]
+    end
+
+    subgraph Core["src/ — Application Core"]
+    end
+
+    subgraph Data["Data & Artifacts"]
+        datasets["Datasets · JSON · CSV"]
+    end
+
+    subgraph Charts["Metrics & Dashboard Charts"]
+        risk_trajectory["Risk trajectory chart"]
+        attack_stats["Attack detection stats"]
+        eval_metrics["Evaluation metrics"]
+        benchmark_p99["Benchmark p99 chart"]
+    end
+
+    user --> api_client
+    api_client --> Core
+    user -->|Web UI| dashboard_kpis
+    Core --> risk_trajectory
+    risk_trajectory --> user
+```
+
+### Data Flow & Charts Pipeline
+
+```mermaid
+flowchart LR
+    U["User / Event"] --> IN["Untrusted Input"]
+
+    subgraph Pipeline["Processing Pipeline"]
+        p0["Input"]
+        p1["Processing"]
+        p2["Output"]
+        p0 --> p1
+        p1 --> p2
+    end
+
+    subgraph Metrics["Metrics & Chart Feeds"]
+        risk_trajectory["Risk trajectory chart"]
+        attack_stats["Attack detection stats"]
+        eval_metrics["Evaluation metrics"]
+        benchmark_p99["Benchmark p99 chart"]
+    end
+
+    IN --> p0
+    p2 --> OUT["Authorized Output"]
+    OUT --> U
+    p2 --> risk_trajectory
+    risk_trajectory --> U
+```
+
+### Component & API Map
+
+```mermaid
+graph LR
+    subgraph App["src Components"]
+        main["main<br/>Main"]
+    end
+```
+
+### Application Page Map
+
+```mermaid
+mindmap
+  root((omegle2))
+    Web UI
+      dashboard
+```
+
+## Screenshots & Assets
+
+![f logo](public/assets/logos/f.png)
+
+![f2 logo](public/assets/logos/f2.png)
+
+![log logo](public/assets/logos/log.png)
+
+![logo logo](public/assets/logos/logo.png)
+
+## Application Pages
+
+Screenshots captured from the running application. Each page is listed with its function.
+
+### Application
+
+#### Home
+
+Home — application page at `/`
+
+![Home](docs/readme-agent/pages/dashboard.png)
